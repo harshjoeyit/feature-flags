@@ -1,0 +1,36 @@
+# Binaries for the current project
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.a
+*.gcno
+*.gcov
+*.prof
+
+# Compiled binaries for the current project (if built in a 'bin' directory)
+/bin/
+
+# Dependency caches
+vendor/
+go.mod.sum # If you are not using Go Modules, remove this line.
+
+# Test results
+*.test
+*.out
+
+# Editor-specific files
+.idea/ # IntelliJ IDEA
+.vscode/ # VS Code
+*.sublime-project
+*.sublime-workspace
+.DS_Store # macOS
+Thumbs.db # Windows
+
+# Log files
+*.log
+
+# Temporary files
+*~
+*.tmp
