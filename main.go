@@ -3,12 +3,21 @@ package main
 import (
 	"fmt"
 	"hash/fnv"
+	"log"
 	"net/http"
+	"os"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+	"github.com/posthog/posthog-go"
+)
+
+// PostHog configuration
+const (
+	DefaultPostHogHost = "https://app.posthog.com"
 )
 
 // FeatureFlag holds the flag state
@@ -47,10 +56,12 @@ type Metrics struct {
 // FeatureFlagService defines interface for feature evaluation
 // This interface makes it easy to swap implementations (local, PostHog, etc.)
 type FeatureFlagService interface {
-	EvaluateFlag(flagName, userID string) bool
 	GetFlags() []*FeatureFlag
 	CreateFlag(flag *FeatureFlag) error
-	UpdateFlag(flag *FeatureFlag) error
+	UpdateFlag(flagName string, updatedFlag *FeatureFlag) error
+	EvaluateFlag(evalReq *EvaluationRequest) (*EvaluationResponse, error)
+	GetMetrics() *Metrics
+	Close() error // For cleanup if needed
 }
 
 // InMemoryFeatureFlagService implements FeatureFlagService (stores flags in memory)
@@ -61,7 +72,7 @@ type InMemoryFeatureFlagService struct {
 	mu      sync.RWMutex
 }
 
-func NewInMemoryFeatureFlagService() *InMemoryFeatureFlagService {
+func NewInMemoryFeatureFlagService() FeatureFlagService {
 	return &InMemoryFeatureFlagService{
 		flags: make(map[string]*FeatureFlag),
 		metrics: &Metrics{
@@ -103,20 +114,20 @@ func (ffs *InMemoryFeatureFlagService) CreateFlag(flag *FeatureFlag) error {
 }
 
 // UpdateFlag updates an existing feature flag
-func (ffs *InMemoryFeatureFlagService) UpdateFlag(name string, flag *FeatureFlag) error {
+func (ffs *InMemoryFeatureFlagService) UpdateFlag(flagName string, updatedFlag *FeatureFlag) error {
 	ffs.mu.Lock()
 	defer ffs.mu.Unlock()
 
-	existing, exists := ffs.flags[name]
+	existing, exists := ffs.flags[flagName]
 	if !exists {
-		return fmt.Errorf("flag %s does not exist", name)
+		return fmt.Errorf("flag %s does not exist", flagName)
 	}
 
-	flag.Name = name // Ensure name remains unchanged
-	flag.CreatedAt = existing.CreatedAt
-	flag.UpdatedAt = time.Now()
+	updatedFlag.Name = flagName // Ensure name remains unchanged
+	updatedFlag.CreatedAt = existing.CreatedAt
+	updatedFlag.UpdatedAt = time.Now()
 
-	ffs.flags[name] = flag
+	ffs.flags[flagName] = updatedFlag
 
 	return nil
 }
@@ -195,6 +206,11 @@ func (ffs *InMemoryFeatureFlagService) selectVariant(variants map[string]int, us
 	return ""
 }
 
+func (ffs *InMemoryFeatureFlagService) Close() error {
+	// No resources to clean up in this implementation
+	return nil
+}
+
 // hashUser creates a deterministic hash for consistent rollout
 func (ffs *InMemoryFeatureFlagService) hashUser(userID string) int {
 	h := fnv.New32a()
@@ -239,16 +255,102 @@ func (ffs *InMemoryFeatureFlagService) GetMetrics() *Metrics {
 	return metricsCopy
 }
 
-func main() {
-	r := gin.Default()
-	client := NewInMemoryFeatureFlagService()
+type PosthogFeatureFlagService struct {
+	client posthog.Client
+}
 
-	r.GET("/flags", func(c *gin.Context) {
-		flags := client.GetFlags()
+func NewPosthogFeatureFlagService(apiKey, host string) FeatureFlagService {
+	client, _ := posthog.NewWithConfig(apiKey, posthog.Config{Endpoint: host})
+	return &PosthogFeatureFlagService{
+		client: client,
+	}
+}
+
+func (pffs *PosthogFeatureFlagService) GetFlags() []*FeatureFlag {
+	// Implement fetching flags from PostHog
+	return []*FeatureFlag{}
+}
+
+func (pffs *PosthogFeatureFlagService) CreateFlag(flag *FeatureFlag) error {
+	// Implement flag creation in PostHog
+	return nil
+}
+
+func (pffs *PosthogFeatureFlagService) UpdateFlag(name string, flag *FeatureFlag) error {
+	// Implement flag update in PostHog
+	return nil
+}
+
+func (pffs *PosthogFeatureFlagService) EvaluateFlag(req *EvaluationRequest) (*EvaluationResponse, error) {
+	// Implement flag evaluation using PostHog
+	return &EvaluationResponse{
+		Enabled:   false,
+		Reason:    "not_implemented",
+		Timestamp: time.Now(),
+	}, nil
+}
+
+func (pffs *PosthogFeatureFlagService) GetMetrics() *Metrics {
+	// Implement fetching metrics from PostHog if available
+	return &Metrics{
+		VariantCounts: make(map[string]map[string]int64),
+		LastReset:     time.Now(),
+	}
+}
+
+func (pffs *PosthogFeatureFlagService) Close() error {
+	return pffs.client.Close()
+}
+
+func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %s", err)
+	}
+
+	postHogHostEndpoint := "https://eu.i.posthog.com"
+	posthogAPIKey := os.Getenv("POSTHOG_API_KEY")
+	if posthogAPIKey == "" {
+		log.Fatal("POSTHOG_API_KEY environment variable is required")
+	}
+
+	ffs := NewPosthogFeatureFlagService(posthogAPIKey, postHogHostEndpoint)
+	defer ffs.Close()
+
+	ffs.GetFlags()
+	ffs.CreateFlag(&FeatureFlag{
+		Name:           "test_flag",
+		Enabled:        true,
+		RolloutPercent: 50,
+		Variants: map[string]int{
+			"variant_a": 50,
+			"variant_b": 50,
+		},
+	})
+	ffs.UpdateFlag("test_flag", &FeatureFlag{
+		Name:           "test_flag",
+		Enabled:        true,
+		RolloutPercent: 75,
+		Variants: map[string]int{
+			"variant_a": 30,
+			"variant_b": 70,
+		},
+	})
+	ffs.EvaluateFlag(&EvaluationRequest{
+		FlagName: "test_flag",
+		UserID:   "user_123",
+	})
+
+	ge := gin.Default()
+
+	// ffs := NewInMemoryFeatureFlagService()
+
+	ge.GET("/flags", func(c *gin.Context) {
+		flags := ffs.GetFlags()
 		c.JSON(http.StatusOK, flags)
 	})
 
-	r.POST("/flags", func(c *gin.Context) {
+	ge.POST("/flags", func(c *gin.Context) {
 		var flag FeatureFlag
 		if err := c.ShouldBindJSON(&flag); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
@@ -259,11 +361,11 @@ func main() {
 			return
 		}
 
-		_ = client.CreateFlag(&flag)
+		_ = ffs.CreateFlag(&flag)
 		c.Status(http.StatusNoContent)
 	})
 
-	r.PUT("/flags/:name", func(c *gin.Context) {
+	ge.PUT("/flags/:name", func(c *gin.Context) {
 		name := c.Param("name")
 		var flag FeatureFlag
 		if err := c.ShouldBindJSON(&flag); err != nil {
@@ -276,7 +378,7 @@ func main() {
 			return
 		}
 
-		err := client.UpdateFlag(name, &flag)
+		err := ffs.UpdateFlag(name, &flag)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
@@ -284,7 +386,7 @@ func main() {
 		c.Status(http.StatusNoContent)
 	})
 
-	r.GET("/flags/evaluate", func(c *gin.Context) {
+	ge.GET("/flags/evaluate", func(c *gin.Context) {
 		userID := c.Query("userid")
 		flagName := c.Query("flag")
 		if flagName == "" {
@@ -297,7 +399,7 @@ func main() {
 			UserID:   userID,
 		}
 
-		resp, err := client.EvaluateFlag(evalReq)
+		resp, err := ffs.EvaluateFlag(evalReq)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -306,10 +408,10 @@ func main() {
 		c.JSON(http.StatusOK, resp)
 	})
 
-	r.GET("/flags/metrics", func(c *gin.Context) {
-		metrics := client.GetMetrics()
+	ge.GET("/flags/metrics", func(c *gin.Context) {
+		metrics := ffs.GetMetrics()
 		c.JSON(http.StatusOK, metrics)
 	})
 
-	r.Run(":9090")
+	ge.Run(":9090")
 }
