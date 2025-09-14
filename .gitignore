@@ -34,3 +34,5 @@ Thumbs.db # Windows
 # Temporary files
 *~
 *.tmp
+
+.env
